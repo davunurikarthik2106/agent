@@ -1,0 +1,39 @@
+FULL NAME
+Phone: +1 (555) 000-0000 | Email: your.email@example.com | LinkedIn: linkedin.com/in/yourprofile | GitHub: github.com/yourusername
+
+SUMMARY
+Results-driven [Your Role] with X years of experience in [your domain]. Proven ability to [key strength 1] and [key strength 2]. Passionate about [area of interest] and delivering [outcome].
+
+SKILLS
+Languages:     Python, JavaScript, TypeScript, SQL, ...
+Frameworks:    React, Node.js, FastAPI, Django, ...
+Tools:         Docker, Kubernetes, Git, CI/CD, ...
+Cloud:         AWS (EC2, S3, Lambda), GCP, Azure, ...
+Methodologies: Agile, Scrum, TDD, REST APIs, ...
+
+EXPERIENCE
+
+[Most Recent Job Title] | [Company Name] | [City, State] | [Month Year – Present]
+- Achieved [measurable result] by [action taken], resulting in [impact/metric].
+- Led [project/initiative] that [outcome], improving [metric] by X%.
+- Collaborated with [team size] engineers to [deliverable].
+
+[Previous Job Title] | [Company Name] | [City, State] | [Month Year – Month Year]
+- Built [product/feature] used by [N] users/customers.
+- Reduced [pain point] by X% through [solution].
+- Mentored [N] junior engineers on [topic].
+
+EDUCATION
+
+[Degree] in [Field of Study] | [University Name] | [Year]
+- GPA: X.X / 4.0 (if notable)
+- Relevant coursework: [Course 1], [Course 2], [Course 3]
+
+PROJECTS
+
+[Project Name] (github.com/link)
+- [One-line description of what it does and the tech stack used.]
+- [Key achievement or metric, e.g., "Handles 10K requests/sec with p99 latency < 20ms."]
+
+CERTIFICATIONS (optional)
+- [Certification Name] — [Issuer], [Year]
