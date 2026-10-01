@@ -1,0 +1,15 @@
+# OAuth / secrets — never commit these
+credentials.json
+token.json
+.env
+
+# Runtime outputs — optional to commit
+processed_threads.json
+tailored_resumes/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
