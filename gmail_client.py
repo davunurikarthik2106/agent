@@ -1,7 +1,8 @@
 import base64
 import json
-import os
-import re
+import logging
+import time
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 from google.auth.transport.requests import Request
@@ -10,10 +11,36 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+import config
+from email_utils import extract_body as _extract_body_util, strip_html as _strip_html
+
+log = logging.getLogger(__name__)
+
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
-PROCESSED_FILE = "processed_threads.json"
-CREDENTIALS_FILE = "credentials.json"
-TOKEN_FILE = "token.json"
+
+# HTTP status codes that are safe to retry
+_RETRYABLE = {429, 500, 502, 503, 504}
+
+
+def _retry(fn, *args, **kwargs):
+    """Call fn(*args, **kwargs), retrying on transient Gmail API errors."""
+    delay = config.RETRY_BASE_DELAY
+    for attempt in range(config.MAX_RETRIES):
+        try:
+            return fn(*args, **kwargs)
+        except HttpError as exc:
+            if exc.resp.status in _RETRYABLE and attempt < config.MAX_RETRIES - 1:
+                log.warning(
+                    "Gmail API %s error, retry %d/%d in %.1fs",
+                    exc.resp.status,
+                    attempt + 1,
+                    config.MAX_RETRIES,
+                    delay,
+                )
+                time.sleep(delay)
+                delay = min(delay * 2, 60)
+            else:
+                raise
 
 
 class GmailClient:
@@ -25,49 +52,54 @@ class GmailClient:
 
     def _authenticate(self):
         creds = None
-        if os.path.exists(TOKEN_FILE):
-            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        if __import__("os").path.exists(config.TOKEN_FILE):
+            creds = Credentials.from_authorized_user_file(config.TOKEN_FILE, SCOPES)
 
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
+                log.info("Refreshing OAuth token…")
                 creds.refresh(Request())
             else:
-                if not os.path.exists(CREDENTIALS_FILE):
+                import os
+                if not os.path.exists(config.CREDENTIALS_FILE):
                     raise FileNotFoundError(
-                        f"'{CREDENTIALS_FILE}' not found. "
+                        f"'{config.CREDENTIALS_FILE}' not found. "
                         "Download it from Google Cloud Console "
                         "(APIs & Services → Credentials → OAuth 2.0 Client)."
                     )
+                log.info("Opening browser for Gmail OAuth consent…")
                 flow = InstalledAppFlow.from_client_secrets_file(
-                    CREDENTIALS_FILE, SCOPES
+                    config.CREDENTIALS_FILE, SCOPES
                 )
                 creds = flow.run_local_server(port=0)
-            with open(TOKEN_FILE, "w") as fh:
+            with open(config.TOKEN_FILE, "w") as fh:
                 fh.write(creds.to_json())
+            log.info("OAuth token saved to %s", config.TOKEN_FILE)
 
         return build("gmail", "v1", credentials=creds)
 
     # ---------------------------------------------------------- processed set
 
     def _load_processed(self) -> set:
-        if os.path.exists(PROCESSED_FILE):
-            with open(PROCESSED_FILE) as fh:
+        import os
+        if os.path.exists(config.PROCESSED_FILE):
+            with open(config.PROCESSED_FILE) as fh:
                 return set(json.load(fh))
         return set()
 
     def _save_processed(self):
-        with open(PROCESSED_FILE, "w") as fh:
-            json.dump(list(self.processed), fh)
+        with open(config.PROCESSED_FILE, "w") as fh:
+            json.dump(sorted(self.processed), fh, indent=2)
 
     # --------------------------------------------------------------- threads
 
     def search_threads(self, query: str = "is:unread", max_results: int = 10) -> dict:
+        max_results = min(max_results, config.MAX_RESULTS_CAP)
         try:
-            resp = (
-                self.service.users()
-                .threads()
-                .list(userId="me", q=query, maxResults=max_results)
-                .execute()
+            resp = _retry(
+                self.service.users().threads().list(
+                    userId="me", q=query, maxResults=max_results
+                ).execute
             )
             raw_threads = resp.get("threads", [])
             threads = []
@@ -76,16 +108,13 @@ class GmailClient:
                 if t["id"] in self.processed:
                     continue
 
-                meta = (
-                    self.service.users()
-                    .threads()
-                    .get(
+                meta = _retry(
+                    self.service.users().threads().get(
                         userId="me",
                         id=t["id"],
                         format="metadata",
-                        metadataHeaders=["Subject", "From", "To", "Date"],
-                    )
-                    .execute()
+                        metadataHeaders=["Subject", "From", "To", "Date", "Message-ID"],
+                    ).execute
                 )
 
                 msgs = meta.get("messages", [])
@@ -100,6 +129,8 @@ class GmailClient:
                 threads.append(
                     {
                         "thread_id": t["id"],
+                        "latest_message_id": latest["id"],
+                        "message_id_header": hdrs.get("Message-ID", ""),
                         "subject": hdrs.get("Subject", "(no subject)"),
                         "from": hdrs.get("From", ""),
                         "to": hdrs.get("To", ""),
@@ -115,15 +146,15 @@ class GmailClient:
             }
 
         except HttpError as exc:
+            log.error("search_threads failed: %s", exc)
             return {"error": str(exc)}
 
     def get_thread(self, thread_id: str) -> dict:
         try:
-            thread = (
-                self.service.users()
-                .threads()
-                .get(userId="me", id=thread_id, format="full")
-                .execute()
+            thread = _retry(
+                self.service.users().threads().get(
+                    userId="me", id=thread_id, format="full"
+                ).execute
             )
 
             messages = []
@@ -136,12 +167,12 @@ class GmailClient:
                 messages.append(
                     {
                         "message_id": msg["id"],
+                        "message_id_header": hdrs.get("Message-ID", ""),
                         "from": hdrs.get("From", ""),
                         "to": hdrs.get("To", ""),
                         "subject": hdrs.get("Subject", ""),
                         "date": hdrs.get("Date", ""),
-                        # Cap at 6 000 chars to stay within reasonable token budgets
-                        "body": body[:6000],
+                        "body": body[: config.BODY_CHAR_LIMIT],
                     }
                 )
 
@@ -152,61 +183,46 @@ class GmailClient:
             }
 
         except HttpError as exc:
+            log.error("get_thread %s failed: %s", thread_id, exc)
             return {"error": str(exc)}
 
     def _extract_body(self, payload: dict) -> str:
-        """Recursively extract plain-text body; fall back to stripped HTML."""
-        if "parts" in payload:
-            plain = ""
-            html = ""
-            for part in payload["parts"]:
-                mime = part.get("mimeType", "")
-                if mime == "text/plain":
-                    data = part.get("body", {}).get("data", "")
-                    if data:
-                        plain += base64.urlsafe_b64decode(data).decode(
-                            "utf-8", errors="ignore"
-                        )
-                elif mime == "text/html" and not plain:
-                    data = part.get("body", {}).get("data", "")
-                    if data:
-                        raw_html = base64.urlsafe_b64decode(data).decode(
-                            "utf-8", errors="ignore"
-                        )
-                        html += re.sub(r"<[^>]+>", " ", raw_html)
-                elif "parts" in part:
-                    sub = self._extract_body(part)
-                    if sub:
-                        plain += sub
-            return (plain or html).strip()
-
-        data = payload.get("body", {}).get("data", "")
-        if data:
-            return base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore").strip()
-        return ""
+        return _extract_body_util(payload)
 
     # ----------------------------------------------------------------- drafts
 
     def create_draft(
-        self, to: str, subject: str, body: str, thread_id: str = None
+        self,
+        to: str,
+        subject: str,
+        body: str,
+        thread_id: str | None = None,
+        in_reply_to: str | None = None,
+        references: str | None = None,
     ) -> dict:
         try:
-            msg = MIMEText(body, "plain", "utf-8")
+            msg = MIMEMultipart("alternative")
             msg["to"] = to
             msg["subject"] = subject
+            if in_reply_to:
+                msg["In-Reply-To"] = in_reply_to
+            if references:
+                msg["References"] = references
+
+            msg.attach(MIMEText(body, "plain", "utf-8"))
 
             raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
             draft_body: dict = {"message": {"raw": raw}}
             if thread_id:
                 draft_body["message"]["threadId"] = thread_id
 
-            draft = (
-                self.service.users()
-                .drafts()
-                .create(userId="me", body=draft_body)
-                .execute()
+            draft = _retry(
+                self.service.users().drafts().create(
+                    userId="me", body=draft_body
+                ).execute
             )
 
+            log.info("Draft created: id=%s to=%s subject=%s", draft["id"], to, subject)
             return {
                 "status": "success",
                 "draft_id": draft["id"],
@@ -215,6 +231,7 @@ class GmailClient:
             }
 
         except HttpError as exc:
+            log.error("create_draft failed: %s", exc)
             return {"error": str(exc)}
 
     # --------------------------------------------------------------- helpers
@@ -222,4 +239,5 @@ class GmailClient:
     def mark_processed(self, thread_id: str) -> dict:
         self.processed.add(thread_id)
         self._save_processed()
+        log.info("Thread %s marked as processed", thread_id)
         return {"status": "success", "thread_id": thread_id}
